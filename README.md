@@ -20,8 +20,10 @@ Počet volných 3KK 12/30
 - Stav se ukládá do `state.json`, aby šlo příští den poznat, co se
   změnilo. Soubor musí přežít mezi jednotlivými spuštěními – proto je
   potřeba na Railway připojit **Volume**.
-- E-mail se posílá přes tvůj Gmail účet (Nodemailer + SMTP), takže
-  nic dalšího není potřeba zakládat.
+- E-mail se posílá přes [Resend](https://resend.com) – zdarma, bez
+  nutnosti dávat notifikátoru přístup k tvému e-mailu. Skript zná jen
+  krátký API klíč, který umí výhradně odesílat e-maily a nic víc
+  (nemůže číst poštu ani nic měnit v tvém účtu).
 
 ## Nasazení na Railway
 
@@ -34,25 +36,30 @@ Počet volných 3KK 12/30
    - Mount path: `/data`
    - Tím se `state.json` uloží trvale mezi jednotlivými běhy.
 
-3. **Nastav proměnné prostředí** (Service → Variables):
+3. **Založ si zdarma účet na** https://resend.com **(stačí e-mail,
+   žádná platební karta)** a v Dashboardu → *API Keys* vytvoř nový
+   klíč (stačí oprávnění "Sending access").
+
+4. **Nastav proměnné prostředí** (Service → Variables):
    ```
-   GMAIL_USER=tvuj.email@gmail.com
-   GMAIL_APP_PASSWORD=xxxxxxxxxxxxxxxx
+   RESEND_API_KEY=re_xxxxxxxxxxxxxxxxxxxxxxxx
+   FROM_EMAIL=Notifikator bytu <onboarding@resend.dev>
    TO_EMAIL=jan.verner@gmail.com
    STATE_FILE=/data/state.json
    ```
-   `GMAIL_APP_PASSWORD` NENÍ tvoje běžné heslo do Gmailu. Vygeneruješ
-   ho zde (musíš mít zapnuté dvoufázové ověření):
-   https://myaccount.google.com/apppasswords
+   Dokud si na Resend neověříš vlastní doménu, e-maily lze posílat
+   jen na adresu, kterou ses na Resend registroval (tedy
+   `jan.verner@gmail.com` – to sedí). `FROM_EMAIL` musí zůstat přesně
+   `onboarding@resend.dev`, jinak Resend odeslání odmítne.
 
-4. **Nastav Cron Schedule:**
+5. **Nastav Cron Schedule:**
    - Service → Settings → *Cron Schedule*
    - Např. `0 7 * * *` = každý den v 7:00 UTC (v létě 9:00, v zimě
      8:00 tvého času)
    - Railway pak jednou denně spustí kontejner, ten proběhne (spustí
      `node scrape-and-notify.mjs`) a ukončí se.
 
-5. **Deploy** a zkontroluj logy prvního běhu (Service → Deployments →
+6. **Deploy** a zkontroluj logy prvního běhu (Service → Deployments →
    Logs). První běh pouze uloží počáteční stav a **žádný e-mail
    neposílá** (nemá s čím porovnávat) – to je záměr, aby první
    spuštění neposlalo falešnou notifikaci o "změně".
@@ -62,7 +69,7 @@ Počet volných 3KK 12/30
 ```bash
 npm install
 npx playwright install --with-deps chromium
-GMAIL_USER=... GMAIL_APP_PASSWORD=... STATE_FILE=./state/state.json node scrape-and-notify.mjs
+RESEND_API_KEY=... STATE_FILE=./state/state.json node scrape-and-notify.mjs
 ```
 
 ## Důležité poznámky

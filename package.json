@@ -8,7 +8,6 @@
     "start": "node scrape-and-notify.mjs"
   },
   "dependencies": {
-    "nodemailer": "^6.9.15",
     "playwright-core": "^1.48.0"
   }
 }

@@ -1,5 +1,4 @@
 import { chromium } from "playwright-core";
-import nodemailer from "nodemailer";
 import fs from "node:fs/promises";
 import path from "node:path";
 
@@ -7,8 +6,9 @@ import path from "node:path";
 const URL = process.env.TARGET_URL || "https://rezidencehury.cz/cenik/";
 const STATE_FILE = process.env.STATE_FILE || "/data/state.json";
 const TO_EMAIL = process.env.TO_EMAIL || "jan.verner@gmail.com";
-const GMAIL_USER = process.env.GMAIL_USER;
-const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD;
+const RESEND_API_KEY = process.env.RESEND_API_KEY;
+// Pokud nemas overenou vlastni domenu na Resend, musi zustat "onboarding@resend.dev"
+const FROM_EMAIL = process.env.FROM_EMAIL || "Notifikator bytu <onboarding@resend.dev>";
 
 const MAX_SCROLL_ITERATIONS = 250;
 const STABLE_ROUNDS_TO_STOP = 4;
@@ -205,29 +205,31 @@ function buildEmailBody(current) {
 }
 
 async function sendEmail(subjectSuffix, current) {
-  if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
-    throw new Error(
-      "Chybí GMAIL_USER nebo GMAIL_APP_PASSWORD v environment variables - email nelze odeslat."
-    );
+  if (!RESEND_API_KEY) {
+    throw new Error("Chybí RESEND_API_KEY v environment variables - email nelze odeslat.");
   }
-
-  const transporter = nodemailer.createTransport({
-    service: "gmail",
-    auth: {
-      user: GMAIL_USER,
-      pass: GMAIL_APP_PASSWORD,
-    },
-  });
 
   const subject = `Změna v nabídce bytu - ${subjectSuffix}`;
   const body = `${subject}\n${buildEmailBody(current)}`;
 
-  await transporter.sendMail({
-    from: GMAIL_USER,
-    to: TO_EMAIL,
-    subject,
-    text: body,
+  const response = await fetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${RESEND_API_KEY}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      from: FROM_EMAIL,
+      to: [TO_EMAIL],
+      subject,
+      text: body,
+    }),
   });
+
+  if (!response.ok) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`Resend API vratilo chybu ${response.status}: ${errText}`);
+  }
 
   log("Email odeslan na", TO_EMAIL, "predmet:", subject);
 }
