@@ -1,0 +1,14 @@
+{
+  "name": "byty-notifikator",
+  "version": "1.0.0",
+  "description": "Denni kontrola dostupnosti bytu na rezidencehury.cz/cenik/ a email notifikace pri zmene",
+  "type": "module",
+  "main": "scrape-and-notify.mjs",
+  "scripts": {
+    "start": "node scrape-and-notify.mjs"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.15",
+    "playwright-core": "^1.48.0"
+  }
+}
