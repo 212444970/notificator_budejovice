@@ -1,3 +1,4 @@
+import "dotenv/config";
 import { chromium } from "playwright-core";
 import fs from "node:fs/promises";
 import path from "node:path";
@@ -7,6 +8,8 @@ const URL = process.env.TARGET_URL || "https://rezidencehury.cz/cenik/";
 const STATE_FILE = process.env.STATE_FILE || "/data/state.json";
 const TO_EMAIL = process.env.TO_EMAIL || "jan.verner@gmail.com";
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
+const TEST_EMAIL = process.env.TEST_EMAIL === "1" || process.env.TEST_EMAIL === "true";
+const TEST_EMAIL_SUBJECT = process.env.TEST_EMAIL_SUBJECT || "Testovací e-mail - aktuální stav";
 // Pokud nemas overenou vlastni domenu na Resend, musi zustat "onboarding@resend.dev"
 const FROM_EMAIL = process.env.FROM_EMAIL || "Notifikator bytu <onboarding@resend.dev>";
 
@@ -66,19 +69,102 @@ async function fetchRenderedText() {
       await page.waitForTimeout(SCROLL_WAIT_MS);
     }
 
-    const bodyText = await page.evaluate(() => document.body.innerText);
-    return bodyText;
+    const { bodyText, apartmentsData } = await page.evaluate(() => {
+      const bodyText = document.body.innerText;
+      const scripts = Array.from(document.querySelectorAll("script"));
+      const dataScript = scripts.find(
+        (script) => script.textContent && script.textContent.includes("RezidenceFiltryData")
+      );
+
+      let apartmentsData = null;
+      if (dataScript) {
+        const match = dataScript.textContent.match(/var\s+RezidenceFiltryData\s*=\s*(\{.*\})\s*;?\s*$/s);
+        if (match) {
+          try {
+            apartmentsData = JSON.parse(match[1]);
+          } catch (err) {
+            console.warn("Nepodarilo se nacist RezidenceFiltryData z HTML.", err.message);
+          }
+        }
+      }
+
+      return { bodyText, apartmentsData };
+    });
+
+    return { fullText: bodyText, apartmentsData };
   } finally {
     await browser.close();
   }
 }
 
 /**
- * Rozparsuje viditelny text stranky na jednotlive byty.
- * Kazdy byt zacina radkem s cislem bytu ve tvaru "A.101".
- * Vraci pole { unitCode, disposition, status }.
+ * Rozparsuje viditelny text stranky nebo data z RezidenceFiltryData.
+ * Vraci pole { unitCode, disposition, status, price, area, pricePerSqm }.
  */
-function parseListings(fullText) {
+function normalizeNumericValue(value) {
+  if (value === null || value === undefined || value === "") return null;
+
+  const cleaned = String(value)
+    .replace(/\u00a0/g, "")
+    .replace(/\s+/g, "")
+    .replace(/\./g, "")
+    .replace(",", ".")
+    .replace(/[^0-9.\-]/g, "");
+
+  if (!cleaned) return null;
+  const num = Number(cleaned);
+  return Number.isFinite(num) ? num : null;
+}
+
+function parsePriceAndAreaFromBlock(blockLines) {
+  const blockText = blockLines.join(" ");
+  const areaMatches = [...blockText.matchAll(/(\d[\d\s.]*,?\d*)\s*m²/gi)].map((match) => normalizeNumericValue(match[1]));
+  const priceMatch = blockText.match(/(\d[\d\s.]*,?\d*)\s*Kč/i);
+
+  let area = areaMatches[0] ?? null;
+  if (areaMatches.length > 1) {
+    const extraArea = areaMatches.slice(1).reduce((sum, value) => sum + (Number.isFinite(value) ? value : 0), 0);
+    area = area !== null ? Math.max(area - extraArea, 0) : null;
+  }
+
+  return {
+    area,
+    price: priceMatch ? normalizeNumericValue(priceMatch[1]) : null,
+  };
+}
+
+function parseListings(fullText, apartmentsData = null) {
+  if (apartmentsData && Array.isArray(apartmentsData.apartments)) {
+    return apartmentsData.apartments
+      .filter((apt) => apt && (apt.name || apt.unitCode) && (apt.layout || apt.disposition))
+      .map((apt) => {
+        const statusRaw = String(apt.status || "").toLowerCase();
+        let status = "VOLNY";
+        if (statusRaw.includes("prod")) {
+          status = "PRODANO";
+        } else if (statusRaw.includes("reserved") || statusRaw.includes("rez")) {
+          status = "REZERVOVANO";
+        }
+
+        const rawPrice = apt.price ?? apt.cena ?? apt.totalPrice ?? apt.priceCzk ?? apt.amount ?? null;
+        const rawArea = apt.area ?? apt.plocha ?? apt.size ?? apt.m2 ?? apt.squareMeters ?? null;
+
+        const price = normalizeNumericValue(rawPrice);
+        const area = normalizeNumericValue(rawArea);
+        const pricePerSqm = price && area ? price / area : null;
+
+        return {
+          unitCode: apt.name || apt.unitCode,
+          disposition: String(apt.layout || apt.disposition || "").toUpperCase().replace(/\s+/g, ""),
+          status,
+          price,
+          area,
+          pricePerSqm,
+        };
+      })
+      .filter((listing) => listing.disposition);
+  }
+
   const lines = fullText
     .split("\n")
     .map((l) => l.trim())
@@ -104,14 +190,11 @@ function parseListings(fullText) {
     if (dispositionRegex.test(line) && !current.disposition) {
       current.disposition = line.toUpperCase().replace(/\s+/g, "");
     }
-
-    // Jakmile narazime na dalsi radek, ktery uz vypada jako novy blok
-    // (napr. dalsi cislo bytu), predchozi radek uz zpracovavame vyse.
   }
   if (current) listings.push(current);
 
   return listings
-    .filter((l) => l.disposition) // zahodit radky, kde se nepodarilo najit dispozici
+    .filter((l) => l.disposition)
     .map((l) => {
       const blockText = l.blockLines.join(" ").toUpperCase();
       let status = "VOLNY";
@@ -120,10 +203,17 @@ function parseListings(fullText) {
       } else if (blockText.includes("REZERVOVÁNO") || blockText.includes("REZERVOVANO")) {
         status = "REZERVOVANO";
       }
+
+      const { area, price } = parsePriceAndAreaFromBlock(l.blockLines);
+      const pricePerSqm = price && area ? price / area : null;
+
       return {
         unitCode: l.unitCode,
         disposition: l.disposition,
         status,
+        price,
+        area,
+        pricePerSqm,
       };
     });
 }
@@ -136,14 +226,37 @@ function aggregate(listings) {
   const result = {};
   for (const item of listings) {
     if (!result[item.disposition]) {
-      result[item.disposition] = { total: 0, available: 0, sold: 0, reserved: 0 };
+      result[item.disposition] = {
+        total: 0,
+        available: 0,
+        sold: 0,
+        reserved: 0,
+        avgPricePerSqm: null,
+        availablePriceSamples: 0,
+      };
     }
     const bucket = result[item.disposition];
     bucket.total++;
-    if (item.status === "VOLNY") bucket.available++;
+    if (item.status === "VOLNY") {
+      bucket.available++;
+      if (typeof item.pricePerSqm === "number") {
+        bucket.availablePriceSamples++;
+        bucket.avgPricePerSqm = (bucket.avgPricePerSqm ?? 0) + item.pricePerSqm;
+      }
+    }
     if (item.status === "PRODANO") bucket.sold++;
     if (item.status === "REZERVOVANO") bucket.reserved++;
   }
+
+  for (const key of Object.keys(result)) {
+    const bucket = result[key];
+    if (bucket.availablePriceSamples > 0) {
+      bucket.avgPricePerSqm = Math.round(bucket.avgPricePerSqm / bucket.availablePriceSamples);
+    } else {
+      bucket.avgPricePerSqm = null;
+    }
+  }
+
   return result;
 }
 
@@ -198,8 +311,12 @@ function buildChangeDescriptions(previous, current) {
 function buildEmailBody(current) {
   const keys = sortDispositionKeys(Object.keys(current));
   const lines = keys.map((key) => {
-    const { available, total } = current[key];
-    return `Počet volných ${key} ${available}/${total}`;
+    const { available, total, avgPricePerSqm } = current[key];
+    const priceText =
+      available > 0 && typeof avgPricePerSqm === "number"
+        ? ` | prům. cena za m²: ${avgPricePerSqm.toLocaleString("cs-CZ")} Kč`
+        : "";
+    return `Počet volných ${key} ${available}/${total}${priceText}`;
   });
   return lines.join("\n");
 }
@@ -237,8 +354,8 @@ async function sendEmail(subjectSuffix, current) {
 // ---------- Hlavni beh ----------
 
 async function main() {
-  const fullText = await fetchRenderedText();
-  const listings = parseListings(fullText);
+  const { fullText, apartmentsData } = await fetchRenderedText();
+  const listings = parseListings(fullText, apartmentsData);
 
   log(`Nalezeno ${listings.length} bytovych radku po naparsovani.`);
 
@@ -251,6 +368,13 @@ async function main() {
   }
 
   const current = aggregate(listings);
+
+  if (TEST_EMAIL) {
+    log("Testovaci rezim: posilam email s aktualnim stavem bez porovnani se stavem predchozim.");
+    await sendEmail(TEST_EMAIL_SUBJECT, current);
+    return;
+  }
+
   const previous = await loadPreviousState();
 
   if (!previous) {
@@ -272,12 +396,16 @@ async function main() {
   await saveState(current);
 }
 
-main()
-  .then(() => {
-    log("Hotovo.");
-    process.exit(0);
-  })
-  .catch((err) => {
-    console.error("CHYBA:", err);
-    process.exit(1);
-  });
+if (process.argv[1] && process.argv[1].endsWith("scrape-and-notify.mjs")) {
+  main()
+    .then(() => {
+      log("Hotovo.");
+      process.exit(0);
+    })
+    .catch((err) => {
+      console.error("CHYBA:", err);
+      process.exit(1);
+    });
+}
+
+export { aggregate, buildEmailBody, parseListings };

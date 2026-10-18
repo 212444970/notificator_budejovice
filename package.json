@@ -8,6 +8,7 @@
     "start": "node scrape-and-notify.mjs"
   },
   "dependencies": {
+    "dotenv": "^16.4.5",
     "playwright-core": "^1.63.0"
   }
 }
